@@ -379,6 +379,7 @@ summary{font-weight:800;color:#617348;cursor:pointer}
       <div class="kicker">STEP 01 · MUSIC MBTI</div>
       <h1>먼저, 나의 리듬을 알아볼까요?</h1>
       <p class="introSub">20가지 질문에 답하며 음악을 고르고 즐기는 나의 성향을 살펴보세요.</p>
+      <p class="hint">완성된 분석 결과와 작성한 이유·추억은 GPT 사이트에 저장됩니다. 짧은 결과 주소를 아는 사람은 볼 수 있으며, 오디오 파일은 전송하지 않습니다.</p>
       <div class="card">
         <div class="progressRow"><span id="progressText">1 / 20</span><span>Music MBTI</span></div>
         <div class="bar"><span id="progressBar"></span></div>
@@ -469,8 +470,8 @@ summary{font-weight:800;color:#617348;cursor:pointer}
       <div class="actions"><button class="btn" id="restart">처음부터 다시</button><button class="btn dark" id="savePdf" type="button" aria-describedby="pdfHelp">최종 결과 PDF로 저장</button></div>
       <p class="pdfHelp" id="pdfHelp">버튼을 누른 뒤 인쇄 창에서 ‘PDF로 저장’ 또는 ‘Microsoft Print to PDF’를 선택하세요. 분석 결과와 현재 수정한 가사·음악 프롬프트가 함께 포함됩니다.</p>
       <div class="sharePanel">
-        <button class="btn primary" id="shareResult" type="button">공유하기 · 결과 링크 복사</button>
-        <p>분석 결과, 세 곡의 제목과 좋아하는 이유·추억, 현재 가사·음악 프롬프트가 공유됩니다. 오디오 파일은 포함되지 않습니다. 링크를 받은 사람은 결과를 볼 수 있습니다.</p>
+        <button class="btn primary" id="shareResult" type="button">공유하기 · 짧은 주소 복사</button>
+        <p>결과는 GPT 사이트에 저장되며 짧은 주소로 공유할 수 있습니다. 분석 결과, 곡 제목과 좋아하는 이유·추억, 현재 제작 프롬프트가 포함됩니다. 오디오 파일은 저장되지 않습니다. 링크를 아는 사람은 결과를 볼 수 있습니다.</p>
         <label class="hidden" id="shareLinkLabel" for="shareLink">최종 결과 공유 링크</label>
         <input class="hidden" id="shareLink" readonly />
         <p id="shareStatus" role="status" aria-live="polite"></p>
@@ -829,10 +830,10 @@ byId('shareResult').onclick=async()=>{
   finally{button.disabled=false;}
 };
 async function openSharedResult(){
-  if(!location.hash.startsWith('#result='))return;
+  if(!location.hash.startsWith('#result=') && !window.MM_ARCHIVE)return;
   const initial=byId('mbtiPage');initial.classList.add('hidden');
   try{
-    const d=await decodeResult(location.hash.slice(8));scores=d.scores;tracks=d.tracks.map(t=>({...emptyTrack(),...t}));
+    const d=window.MM_ARCHIVE?.snapshot || await decodeResult(location.hash.slice(8));scores=d.scores;tracks=d.tracks.map(t=>({...emptyTrack(),...t}));
     viewResult.onclick();
     reportTextIds.forEach((id,i)=>byId(id).textContent=d.text[i]);
     byId('songTheme').value=d.theme;byId('lyricsPrompt').value=d.lyrics;byId('musicPrompt').value=d.music;
@@ -852,6 +853,74 @@ restart.onclick=()=>{
   byId('generatePrompts').classList.remove('hidden');byId('restart').textContent='처음부터 다시';
   byId('shareLink').value='';byId('shareLink').classList.add('hidden');byId('shareLinkLabel').classList.add('hidden');byId('shareStatus').textContent='';
 };
+// Loaded after the original application. Analysis, audio, PDF and prompt logic stay intact.
+(() => {
+  const sharingOrigin = ['localhost','127.0.0.1'].includes(location.hostname) ? location.origin : "https://music-mirror-create-share.iboe-12.chatgpt.site";
+  const saved = new Map(), pending = new Map();
+  let generation = 0;
+  const status = byId('shareStatus');
+  const showLink = url => {
+    byId('shareLink').value = url;
+    byId('shareLink').classList.remove('hidden');
+    byId('shareLinkLabel').classList.remove('hidden');
+  };
+  async function saveReport() {
+    if (window.MM_ARCHIVE) return window.MM_ARCHIVE.url;
+    const payload = JSON.stringify(resultSnapshot());
+    if (saved.has(payload)) return saved.get(payload);
+    if (pending.has(payload)) return pending.get(payload);
+    const task = (async () => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 25000);
+      try {
+        const response = await fetch(sharingOrigin+'/api/results', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: payload, signal: controller.signal, credentials: 'omit'
+        });
+        if (!response.ok) throw new Error('save failed');
+        const {url} = await response.json();
+        const parsed = new URL(url);
+        if (parsed.origin !== sharingOrigin || !/^\/r\/[A-Za-z0-9_-]{16}$/.test(parsed.pathname) || parsed.search || parsed.hash) throw new Error('invalid result URL');
+        saved.set(payload, url);
+        return url;
+      } finally { clearTimeout(timeout); }
+    })();
+    pending.set(payload, task);
+    try { return await task; } finally { pending.delete(payload); }
+  }
+  const originalView = viewResult.onclick;
+  viewResult.onclick = (...args) => {
+    originalView(...args);
+    if (window.MM_ARCHIVE || location.hash.startsWith('#result=')) return;
+    const currentGeneration = generation;
+    status.textContent = '결과를 저장하고 있습니다…';
+    saveReport().then(url => {
+      if (currentGeneration !== generation) return;
+      showLink(url); status.textContent = '결과를 저장했습니다. 아래 짧은 주소로 다시 볼 수 있습니다.';
+    }).catch(() => {
+      if (currentGeneration === generation) status.textContent = '결과를 서버에 저장하지 못했습니다. 화면의 결과는 유지됩니다. 공유 버튼을 눌러 다시 시도하거나 PDF로 저장해 주세요.';
+    });
+  };
+  byId('shareResult').onclick = async () => {
+    const button = byId('shareResult'), currentGeneration = generation;
+    button.disabled = true;
+    status.textContent = '현재 결과를 저장하고 있습니다…';
+    try {
+      const url = await saveReport();
+      if (currentGeneration !== generation) return;
+      showLink(url);
+      try { await navigator.clipboard.writeText(url); status.textContent = '짧은 결과 주소를 복사했습니다.'; }
+      catch { byId('shareLink').focus(); byId('shareLink').select(); status.textContent = '저장되었습니다. 아래 주소를 복사해 공유해 주세요.'; }
+    } catch { if (currentGeneration === generation) status.textContent = '서버 저장에 실패했습니다. 공유 버튼을 눌러 다시 시도하거나 PDF로 저장해 주세요.'; }
+    finally { button.disabled = false; }
+  };
+  const originalRestart = restart.onclick;
+  restart.onclick = (...args) => {
+    if (window.MM_ARCHIVE) { location.href = new URL('/', window.MM_ARCHIVE.url).href; return; }
+    generation++; saved.clear(); originalRestart(...args);
+  };
+})();
+
 openSharedResult();
 
 </script>
